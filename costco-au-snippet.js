@@ -3,7 +3,7 @@
 //   1. the In-Warehouse Savings booklet (the viewer.joomag.com link on costco.com.au/warehouse-savings)
 //      -> saves costco-booklet.json
 //   2. your receipts, costco.com.au/my-account/receipts (logged in)
-//      -> saves costco-receipts.json (this month and last month)
+//      -> saves costco-receipts.json (the last 30 days of receipts)
 // It only reads what the page already shows you, at about the speed you would click, and saves a file
 // to your Downloads folder. Nothing is sent anywhere.
 (async () => {
@@ -37,8 +37,11 @@
     const select = document.querySelector('select');
     if (!select) return console.log('No month list found. Wait for the receipts to load and paste again.');
     const receipts = [];
-    // the 30-day window never reaches further back than last month
-    for (const label of [...select.options].slice(0, 2).map(o => o.text.trim())) {
+    // every month the 30-day window touches: options read like "October 2026", newest first
+    const cut = new Date(Date.now() - 30 * 864e5);
+    const firstOfCut = new Date(cut.getFullYear(), cut.getMonth(), 1);
+    const labels = [...select.options].map(o => o.text.trim()).filter(t => new Date('1 ' + t) >= firstOfCut);
+    for (const label of labels) {
       await close();
       select.selectedIndex = [...select.options].findIndex(o => o.text.trim() === label);
       select.dispatchEvent(new Event('change', { bubbles: true }));
