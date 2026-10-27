@@ -60,9 +60,15 @@ def booklet_dates(url):
     return datetime.date(2000 + d[2], d[1], d[0]), datetime.date(2000 + d[5], d[4], d[3])
 
 
+def read_json(path):
+    if not os.path.exists(path):
+        sys.exit(f'{path} not found. Run costco-au sync first, or pass the files the browser snippet saved.')
+    return json.load(open(path))
+
+
 def load_booklet(path):
     """Read the file the snippet saves on the booklet: {'url', 'pages': {view: text}}."""
-    data = json.load(open(path))
+    data = read_json(path)
     pages = data.get('pages', data)
     return data.get('url', next(iter(pages), '')), list(pages.values())
 
@@ -98,8 +104,8 @@ def parse_booklet(texts):
 # ---------- receipts ----------
 
 def load_receipts(path):
-    """Read the file the snippet saves on the receipts page: a list of {'text'}."""
-    data = json.load(open(path))
+    """Read the file the snippet saves on the receipts page (a list of {'text'}), or the one sync saves."""
+    data = read_json(path)
     if isinstance(data, dict):
         data = [r for month in data.values() for r in (month or [])]
     return [r if isinstance(r, dict) and 'lines' in r else r['text'] if isinstance(r, dict) else r for r in data]
@@ -299,16 +305,14 @@ def chrome_tabs():
         return None
 
 
-def start_chrome(headless):
+def start_chrome():
     args = [CHROME, f'--user-data-dir={HOME}/chrome-profile', f'--remote-debugging-port={PORT}',
             '--no-first-run', '--no-default-browser-check']
-    if headless:
-        args.append('--headless=new')
     os.makedirs(HOME, exist_ok=True)
     proc = subprocess.Popen(args + [RECEIPTS_PAGE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(30):
         time.sleep(1)
-        if chrome_tabs():
+        if chrome_tabs() is not None:
             return proc
     sys.exit('Chrome did not start.')
 
@@ -351,7 +355,9 @@ FLIP_BOOKLET = """(async () => {
 
 
 def sync(months):
-    started = None if chrome_tabs() else start_chrome(headless=True)
+    # None means no Chrome on the port; an empty list is Chrome still running with its window closed.
+    # Not headless: headless Chrome gets the booklet's text-only view, which leaves out half the pages.
+    started = None if chrome_tabs() is not None else start_chrome()
     try:
         tab = costco_tab() or new_tab(RECEIPTS_PAGE)
         tab.call('Network.enable')
@@ -405,11 +411,12 @@ def cmd_link(args):
 
 
 def cmd_login(args):
-    if chrome_tabs():
-        print(f'Chrome is already running on port {PORT}. Sign in to costco.com.au there.')
-        return
-    start_chrome(headless=False)
-    print('A Chrome window has opened. Sign in to costco.com.au there, then close it and run: costco-au sync')
+    if chrome_tabs() is not None:
+        new_tab(RECEIPTS_PAGE)
+    else:
+        start_chrome()
+    print('A Chrome window has opened. Sign in to costco.com.au there (tick "Keep me signed in"), '
+          'then run: costco-au sync')
 
 
 def cmd_sync(args):

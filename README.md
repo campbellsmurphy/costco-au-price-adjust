@@ -48,14 +48,14 @@ Or download `costco_au.py` and run it with `python3 costco_au.py`.
 ## Use it: sync (macOS, Google Chrome)
 
 ```bash
-costco-au login    # a Chrome window opens: sign in to costco.com.au yourself, then close it
+costco-au login    # a Chrome window opens: sign in to costco.com.au yourself
 costco-au sync     # saves this and last month's receipts, and the current booklet
 costco-au check    # what to ask for
 ```
 
 How `sync` works:
 - `login` opens Chrome with a profile kept only for this tool (`~/.local/share/costco-au/chrome-profile`). Your normal Chrome is left alone.
-- `sync` reuses that sign-in in the background. It opens the receipts page and reads the session header the page itself sends. Then it requests your receipts and opens the booklet the way the page would.
+- `sync` reuses that sign-in. It opens a Chrome window for about 20 seconds and closes it again. It doesn't run hidden, because headless Chrome gets a text-only booklet that leaves out half the pages. In that window it opens the receipts page and reads the session header the page itself sends. Then it requests your receipts and turns through the booklet.
 - The header is held in memory only for the length of the sync. Receipts and the booklet are saved to `~/.local/share/costco-au/`.
 - When Costco ends the session, `sync` says so; run `costco-au login` again.
 
