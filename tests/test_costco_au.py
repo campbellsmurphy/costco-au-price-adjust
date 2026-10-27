@@ -99,6 +99,16 @@ class Check(unittest.TestCase):
                          [('11356', 1, True), ('112472', 2, False)])
         self.assertIsNone(c.receipt_from_api({'recordType': 'REFUND'}))
 
+    def test_online_finding(self):
+        today = datetime.date(2026, 10, 20)
+        prod = lambda price, off=None, end=None: {'name': 'Thing', 'price': {'value': price},
+                                                  'couponDiscount': {'discountValue': off, 'discountEndDate': end} if off else None}
+        self.assertIsNone(c.online_finding(prod(62.99), 59.99, today))                     # dearer online: nothing
+        self.assertEqual(c.online_finding(prod(54.99), 59.99, today)['now'], 54.99)          # plain price cut
+        self.assertEqual(c.online_finding(prod(62.99, 13, '2026-10-25T12:59:00Z'), 59.99, today)['off'], 13.0)
+        self.assertIsNone(c.online_finding(prod(62.99, 13, '2026-10-01T12:59:00Z'), 59.99, today))  # ended
+        self.assertIsNone(c.online_finding({}, 59.99, today))                               # not sold online
+
     def test_outside_30_days(self):
         claims, _, in_window = c.find_claims([self.receipt], self.offers, set(), datetime.date(2026, 11, 10))
         self.assertEqual((claims, in_window), ([], []))

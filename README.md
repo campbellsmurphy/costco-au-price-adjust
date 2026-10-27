@@ -85,7 +85,7 @@ Options:
 |---|---|
 | `--extra 122000=8.00` | Add a special that isn't in the booklet, such as a shelf sign you photographed. The format is item number = dollars off. |
 | `--claimed refunds.csv` | Skip lines you have already been refunded. The CSV needs the columns `purchase_date,item`, with dates as YYYY-MM-DD. Refund receipts don't show on the website, so keep this yourself. |
-| `--online` | Also look up costco.com.au online discounts on what you bought. They are listed separately, because online prices and pack sizes often differ from the warehouse. |
+| `--online` | Also look up what you bought on costco.com.au. It flags a live "$ off", or an online price (after any discount) below what you paid. Results are listed separately, because online prices usually run a few dollars above the warehouse and pack sizes can differ. |
 | `--today 2026-10-07` | Run as if it were another day. |
 
 ## At the counter

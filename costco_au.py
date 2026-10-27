@@ -197,20 +197,33 @@ def find_claims(receipts, offers, claimed, today):
 
 # ---------- online discounts (opt in) ----------
 
-def online_discounts(codes, today):
-    """costco.com.au online discounts on the given item numbers: one request per item, a second apart."""
+def online_finding(p, paid, today):
+    """What costco.com.au shows for one product that is worth a look: a live '$X off', or a price
+    (after any discount) below what you paid in the warehouse. None if neither."""
+    if not p.get('name'):
+        return None
+    c = p.get('couponDiscount') or {}
+    end = (c.get('discountEndDate') or '')[:10]
+    off = float(c['discountValue']) if c.get('discountValue') and (not end or end >= today.isoformat()) else 0.0
+    price = (p.get('price') or {}).get('value')
+    now = price - off if price is not None else None
+    if not off and not (now is not None and now < paid):
+        return None
+    return {'off': off, 'end': end, 'now': now, 'paid': paid, 'name': p['name']}
+
+
+def online_check(paid_by_code, today):
+    """Look up each item on costco.com.au: one request per item, a second apart."""
     found = {}
-    for code in sorted(codes):
+    for code, paid in sorted(paid_by_code.items()):
         body = get(PRODUCT.format(code=code))
         time.sleep(1)
         try:
-            p = json.loads(body) if body else {}
+            f = online_finding(json.loads(body) if body else {}, paid, today)
         except ValueError:
             continue
-        c = p.get('couponDiscount') or {}
-        end = (c.get('discountEndDate') or '')[:10]
-        if c.get('discountValue') and (not end or end >= today.isoformat()):
-            found[code] = {'off': float(c['discountValue']), 'end': end, 'name': p.get('name', '')}
+        if f:
+            found[code] = f
     return found
 
 
@@ -458,16 +471,22 @@ def cmd_check(args):
         print(f"  not counted: {it['item']} bought {r['date']:%d/%m}: {why}")
 
     if args.online:
-        codes = {it['item'] for r in in_window for it in r['items'] if it['item'] not in offers}
-        print(f'\nChecking costco.com.au for online discounts on {len(codes)} items (about {len(codes)} seconds)...')
-        web = online_discounts(codes, today)
+        paid = {}
+        for r in in_window:
+            for it in r['items']:
+                if it['item'] not in offers:
+                    paid[it['item']] = max(paid.get(it['item'], 0), it['paid'])
+        print(f'\nChecking costco.com.au for discounts and price cuts on {len(paid)} items (about {len(paid)} seconds)...')
+        web = online_check(paid, today)
         if web:
-            print('Online discounts on things you bought. Not counted above: online prices and pack sizes can')
-            print('differ from the warehouse, so check the shelf or ask at the counter.')
+            print('Worth a look. Not counted above: online prices and pack sizes can differ from the warehouse,')
+            print('so check the shelf or ask at the counter.')
             for code, w in sorted(web.items()):
-                print(f"  {code}  ${w['off']:.2f} off online until {w['end'] or '?'}  {w['name']}")
+                deal = f"${w['off']:.2f} off online until {w['end'] or '?'}" if w['off'] else 'price cut online'
+                now = f", now ${w['now']:.2f} online (you paid ${w['paid']:.2f})" if w['now'] is not None else ''
+                print(f"  {code}  {deal}{now}  {w['name']}")
         else:
-            print('None found.')
+            print('Nothing cheaper online.')
 
 
 def main(argv=None):
@@ -485,7 +504,8 @@ def main(argv=None):
     c.add_argument('--claimed', help='CSV of refunds you already got (purchase_date,item)')
     c.add_argument('--extra', nargs='*', default=[], metavar='ITEM=OFF',
                    help='specials not in the booklet, such as a shelf sign: 122000=8.00')
-    c.add_argument('--online', action='store_true', help='also look up costco.com.au online discounts')
+    c.add_argument('--online', action='store_true',
+                   help='also look up costco.com.au discounts and price cuts on what you bought')
     c.add_argument('--today', help='pretend today is YYYY-MM-DD')
     args = p.parse_args(argv)
     {'link': cmd_link, 'login': cmd_login, 'sync': cmd_sync, 'check': cmd_check}[args.cmd](args)
