@@ -17,7 +17,7 @@ Total to ask for: $11.00
   not counted: 173354 bought 10/10: the discount was already taken at the till
 ```
 
-The US and Canadian tools ([costco-cli](https://github.com/mdkocher/costco-cli), [costco-price-match](https://github.com/awsdataarchitect/costco-price-match) and others) only work with costco.com. Costco Australia runs a different website, and its booklet is a Joomag flipbook, so this one is for Australian members.
+The tools I could find for this ([costco-cli](https://github.com/mdkocher/costco-cli), [costco-price-match](https://github.com/awsdataarchitect/costco-price-match) and others) work with costco.com in the US and Canada. Costco Australia runs on a different system: the receipts come from a different API, it needs a separate account, and the booklet is a Joomag flipbook. So this one is for Australian members. If you know of another one, open an issue.
 
 ## Not affiliated with Costco
 
@@ -25,8 +25,11 @@ This is an unofficial personal project. It is not affiliated with, endorsed by o
 
 Read Costco's [website terms](https://www.costco.com.au/terms-and-conditions) yourself before you use it. They allow personal, non-commercial use, and they restrict automated tools. The tool is built to stay close to normal browsing:
 
-- **You read your own data in your own browser.** The snippet opens your receipts one at a time, much as you would by hand, and saves them to a file on your computer. It never sees your password, stores no login and sends nothing anywhere.
-- **The script makes one small request by itself.** That is the booklet link lookup (`costco-au link`), which is public. Online discount lookups (`--online`) are off unless you ask, and space out one item per second.
+- **You sign in yourself, and only to your own account.** The tool never sees or stores your password.
+- **There are two ways to get your data, and both stay on your computer.**
+  - The browser snippet reads the receipts the page shows you, one at a time.
+  - `costco-au sync` asks for your receipts directly. It makes the same requests the My Warehouse Receipts page makes, from inside your signed-in Chrome. It waits a second between receipts. These are undocumented Costco endpoints, so `sync` is the further of the two from ordinary browsing.
+- **Few requests.** A sync is a few dozen requests: two months of receipts and one booklet. Online discount lookups (`--online`) are off unless you ask, and space out one item per second.
 - **Nothing from Costco is in this repository.** No booklet pages, prices or product data.
 - **Personal use only.** Don't run it for other people, don't host it as a service and don't sell it.
 
@@ -42,9 +45,23 @@ pipx install git+https://github.com/campbellsmurphy/costco-au-price-adjust
 
 Or download `costco_au.py` and run it with `python3 costco_au.py`.
 
-## Use it
+## Use it: sync (macOS, Google Chrome)
 
-You do steps 1 and 2 in your browser, and step 3 in a terminal. Both browser steps use the same snippet, [`costco-au-snippet.js`](costco-au-snippet.js). Open it, select all and copy.
+```bash
+costco-au login    # a Chrome window opens: sign in to costco.com.au yourself, then close it
+costco-au sync     # saves this and last month's receipts, and the current booklet
+costco-au check    # what to ask for
+```
+
+How `sync` works:
+- `login` opens Chrome with a profile kept only for this tool (`~/.local/share/costco-au/chrome-profile`). Your normal Chrome is left alone.
+- `sync` reuses that sign-in in the background. It opens the receipts page and reads the session header the page itself sends. Then it requests your receipts and opens the booklet the way the page would.
+- The header is held in memory only for the length of the sync. Receipts and the booklet are saved to `~/.local/share/costco-au/`.
+- When Costco ends the session, `sync` says so; run `costco-au login` again.
+
+## Or use it without sync: the browser snippet
+
+This works in any desktop browser, with nothing installed but Python. You do steps 1 and 2 in your browser, and step 3 in a terminal. Both browser steps use the same snippet, [`costco-au-snippet.js`](costco-au-snippet.js). Open it, select all and copy.
 
 **1. Save the booklet.** Open costco.com.au/warehouse-savings and click through to the booklet, or run `costco-au link` to get the link. Wait for it to load. Open the browser console:
 - Chrome: View > Developer > JavaScript Console.
@@ -85,6 +102,7 @@ Bring the table, on paper or your phone, and your membership card. The receipt i
 ## How it works
 
 - `costco-au link` reads the booklet link from the same costco.com.au page data the website uses.
+- `sync` talks to Chrome over its local DevTools port, using a small built-in client. It saves the receipt data the website receives, and the text the booklet viewer shows.
 - The snippet saves the text the booklet viewer shows, and the text of each receipt as displayed.
 - `costco_au.py` matches item numbers between the two files. It skips receipt lines that already carry a discount, refunds, fuel, and anything older than 30 days.
 

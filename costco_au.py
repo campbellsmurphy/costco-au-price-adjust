@@ -9,14 +9,20 @@ receipts against the current In-Warehouse Savings booklet and lists what to ask 
   costco-au check costco-receipts.json costco-booklet.json   what to ask for
 """
 import argparse
+import base64
 import csv
 import datetime
 import json
+import os
 import re
+import socket
+import struct
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+from zoneinfo import ZoneInfo
 
 UA = 'costco-au-price-adjust (personal use; https://github.com/campbellsmurphy/costco-au-price-adjust)'
 CMS = 'https://www.costco.com.au/rest/v3/australia/cms/pages?pageType=ContentPage&pageLabelOrId=warehouse-savings'
@@ -96,13 +102,14 @@ def load_receipts(path):
     data = json.load(open(path))
     if isinstance(data, dict):
         data = [r for month in data.values() for r in (month or [])]
-    return [r['text'] if isinstance(r, dict) else r for r in data]
+    return [r if isinstance(r, dict) and 'lines' in r else r['text'] if isinstance(r, dict) else r for r in data]
 
 
 def parse_receipt(text):
     """Pull the date, member number and shop lines out of one receipt's text."""
     when = re.search(r'(\d{2})/(\d{2})/(\d{4}) \d{2}:\d{2}', text)
-    if not when:
+    # a refund receipt (items sold below zero) has no purchases on it, only reversals
+    if not when or re.search(r'ITEMS SOLD = -\d', text):
         return None
     member = re.search(r'Member (\d+)', text)
     lines = text.split('\n')
@@ -124,6 +131,33 @@ def parse_receipt(text):
     return {
         'date': datetime.date(int(when.group(3)), int(when.group(2)), int(when.group(1))),
         'member': member.group(1) if member else '',
+        'items': items,
+    }
+
+
+def receipt_from_api(d):
+    """Same shape as parse_receipt, from a receipt that `sync` saved (costco.com.au receipt details JSON)."""
+    if d.get('recordType') != 'SALE':
+        return None
+    when = datetime.datetime.fromisoformat(d['transactionDateTime'].replace('Z', '+00:00'))
+    lines = d.get('lines') or []
+    items = []
+    for j, l in enumerate(lines):
+        qty = l.get('qty') or 0
+        # fuel is sold in fractional litres; a COUPON line straight after an item is a discount taken at the till
+        if l.get('type') != 'CAPTURED' or qty != int(qty) or qty <= 0:
+            continue
+        nxt = lines[j + 1] if j + 1 < len(lines) else {}
+        items.append({
+            'item': l['itemNumber'],
+            'qty': int(qty),
+            'paid': l['sellPrice']['value'],
+            'name': ' '.join(l.get('itemDescription') or [])[:60],
+            'discounted': nxt.get('type') == 'COUPON',
+        })
+    return {
+        'date': when.astimezone(ZoneInfo('Australia/Sydney')).date(),
+        'member': d.get('membershipNumber', ''),
         'items': items,
     }
 
@@ -174,6 +208,192 @@ def online_discounts(codes, today):
     return found
 
 
+# ---------- sync: your own receipts, through your own signed-in Chrome ----------
+#
+# Like costco-cli for costco.com: `login` opens Chrome with a profile kept just for this tool and you sign in
+# yourself. `sync` then runs the receipts requests inside that signed-in costco.com.au tab, the same requests
+# the My Warehouse Receipts page makes, so the session token never leaves the browser.
+
+
+HOME = os.path.expanduser(os.environ.get('COSTCO_AU_HOME', '~/.local/share/costco-au'))
+PORT = int(os.environ.get('COSTCO_AU_PORT', '9333'))
+CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+RECEIPTS_PAGE = 'https://www.costco.com.au/my-account/receipts'
+
+
+class Tab:
+    """Just enough of the Chrome DevTools protocol (over a local WebSocket) to run JavaScript in a tab."""
+
+    def __init__(self, ws_url):
+        host, path = ws_url[len('ws://'):].split('/', 1)
+        h, p = host.split(':')
+        self.sock = socket.create_connection((h, int(p)), timeout=60)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall((f'GET /{path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                           f'Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n').encode())
+        reply = b''
+        while b'\r\n\r\n' not in reply:
+            reply += self.sock.recv(1)
+        self.next_id = 0
+
+    def _read(self, n):
+        b = b''
+        while len(b) < n:
+            chunk = self.sock.recv(n - len(b))
+            if not chunk:
+                raise EOFError('Chrome closed the connection')
+            b += chunk
+        return b
+
+    def _frame(self):
+        msg = b''
+        while True:
+            b0, b1 = self._read(2)
+            n = b1 & 0x7f
+            if n == 126:
+                n = struct.unpack('>H', self._read(2))[0]
+            elif n == 127:
+                n = struct.unpack('>Q', self._read(8))[0]
+            msg += self._read(n)
+            if b0 & 0x80:
+                return json.loads(msg)
+
+    def wait_for(self, method, match, timeout=30):
+        """Return the params of the first `method` event that `match(params)` accepts."""
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                m = self._frame()
+            except TimeoutError:
+                return None
+            if m.get('method') == method and match(m['params']):
+                return m['params']
+        return None
+
+    def call(self, method, **params):
+        self.next_id += 1
+        data = json.dumps({'id': self.next_id, 'method': method, 'params': params}).encode()
+        mask = os.urandom(4)
+        n = len(data)
+        head = bytes([0x81]) + (bytes([0x80 | n]) if n < 126 else bytes([0xfe]) + struct.pack('>H', n) if n < 65536
+                                 else bytes([0xff]) + struct.pack('>Q', n))
+        self.sock.sendall(head + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+        while True:
+            m = self._frame()
+            if m.get('id') == self.next_id:
+                if 'error' in m:
+                    raise RuntimeError(m['error'])
+                return m['result']
+
+    def js(self, expression):
+        r = self.call('Runtime.evaluate', expression=expression, awaitPromise=True, returnByValue=True)
+        if 'exceptionDetails' in r:
+            raise RuntimeError(r['exceptionDetails'].get('exception', {}).get('description', r['exceptionDetails']))
+        return r['result'].get('value')
+
+
+def chrome_tabs():
+    try:
+        return json.load(urllib.request.urlopen(f'http://127.0.0.1:{PORT}/json/list', timeout=3))
+    except OSError:
+        return None
+
+
+def start_chrome(headless):
+    args = [CHROME, f'--user-data-dir={HOME}/chrome-profile', f'--remote-debugging-port={PORT}',
+            '--no-first-run', '--no-default-browser-check']
+    if headless:
+        args.append('--headless=new')
+    os.makedirs(HOME, exist_ok=True)
+    proc = subprocess.Popen(args + [RECEIPTS_PAGE], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(30):
+        time.sleep(1)
+        if chrome_tabs():
+            return proc
+    sys.exit('Chrome did not start.')
+
+
+def costco_tab():
+    for t in chrome_tabs() or []:
+        if t['type'] == 'page' and 'costco.com.au' in t['url']:
+            return Tab(t['webSocketDebuggerUrl'])
+
+
+def new_tab(url):
+    req = urllib.request.Request(f'http://127.0.0.1:{PORT}/json/new?{url}', method='PUT')
+    return Tab(json.load(urllib.request.urlopen(req))['webSocketDebuggerUrl'])
+
+
+def post(tab, auth, path, body):
+    """POST to costco.com.au from inside the signed-in tab, with the page's own session."""
+    r = tab.js("(async () => { const r = await fetch(%s, {method: 'POST', body: %s, headers: {"
+               "'Content-Type': 'application/json', Accept: 'application/json', Authorization: %s}});"
+               " return {status: r.status, body: await r.text()}; })()"
+               % (json.dumps(f'/rest/v2/australia/users/current/{path}?lang=en_AU&curr=AUD'),
+                  json.dumps(json.dumps(body)), json.dumps(auth)))
+    if r['status'] != 200:
+        sys.exit(f'costco.com.au answered {r["status"]} for {path}. Try again later, or run costco-au login.')
+    return json.loads(r['body'])
+
+
+# The same page turning as the browser snippet: each view's text is kept until the last page.
+FLIP_BOOKLET = """(async () => {
+  const pages = {}; let last = '';
+  for (let n = 0; n < 40; n++) {
+    await new Promise(r => setTimeout(r, 1800));
+    pages[location.pathname] = document.body.innerText;
+    if (location.pathname === last) break;
+    last = location.pathname;
+    document.querySelector('.j-button-next')?.click();
+  }
+  return pages;
+})()"""
+
+
+def sync(months):
+    started = None if chrome_tabs() else start_chrome(headless=True)
+    try:
+        tab = costco_tab() or new_tab(RECEIPTS_PAGE)
+        tab.call('Network.enable')
+        tab.call('Page.navigate', url=RECEIPTS_PAGE)
+        # read the session header off the page's own first account request
+        # signed out, the page redirects to /login and asks for that page's data instead
+        ev = tab.wait_for('Network.requestWillBeSent', lambda p: '/rest/v2/australia/users/' in p['request']['url']
+                          or '/metadata/login' in p['request']['url'], timeout=40)
+        if not ev or '/users/' not in ev['request']['url'] or '/users/anonymous' in ev['request']['url'] \
+                or 'Authorization' not in ev['request']['headers']:
+            sys.exit('Not signed in to costco.com.au. Run: costco-au login')
+        auth = ev['request']['headers']['Authorization']
+        tab.call('Network.disable')
+
+        first = datetime.date.today().replace(day=1)
+        month_list = [first]
+        for _ in range(months - 1):
+            month_list.append((month_list[-1] - datetime.timedelta(days=1)).replace(day=1))
+        receipts = []
+        for m in month_list:
+            for summary in post(tab, auth, 'receipts', {'transactionMonth': f'{m:%Y-%m}', 'sortCode': '', 'source': 'inline'}).get('receiptsSummaryList') or []:
+                if summary['recordType'] != 'SALE':
+                    continue
+                time.sleep(1)
+                receipts.append(post(tab, auth, 'receipts/details', {'receiptNumber': summary['receiptNumber'], 'source': 'inline'}))
+        with open(os.path.join(HOME, 'receipts.json'), 'w') as f:
+            json.dump(receipts, f)
+        print(f'Saved {len(receipts)} receipts ({", ".join(f"{m:%b %Y}" for m in month_list)}).')
+
+        url = booklet_url()
+        btab = new_tab(url)
+        time.sleep(4)
+        pages = btab.js(FLIP_BOOKLET)
+        btab.call('Page.close')
+        with open(os.path.join(HOME, 'booklet.json'), 'w') as f:
+            json.dump({'url': url, 'pages': pages}, f)
+        print(f'Saved the booklet ({len(parse_booklet(pages.values()))} items).')
+    finally:
+        if started:
+            started.terminate()
+
+
 # ---------- commands ----------
 
 def cmd_link(args):
@@ -182,6 +402,18 @@ def cmd_link(args):
     print(url)
     if start:
         print(f'Valid {start:%d/%m/%Y} to {end:%d/%m/%Y}')
+
+
+def cmd_login(args):
+    if chrome_tabs():
+        print(f'Chrome is already running on port {PORT}. Sign in to costco.com.au there.')
+        return
+    start_chrome(headless=False)
+    print('A Chrome window has opened. Sign in to costco.com.au there, then close it and run: costco-au sync')
+
+
+def cmd_sync(args):
+    sync(args.months)
 
 
 def cmd_check(args):
@@ -194,7 +426,7 @@ def cmd_check(args):
         num, off = extra.split('=')
         offers[num] = {'off': float(off), 'price': None, 'name': 'shelf sign'}
     start, end = booklet_dates(url)
-    receipts = [parse_receipt(t) for t in load_receipts(args.receipts)]
+    receipts = [receipt_from_api(r) if isinstance(r, dict) else parse_receipt(r) for r in load_receipts(args.receipts)]
     if end and end < today:
         print(f'Note: this booklet ended {end:%d/%m/%Y}. Save the current one first.\n')
     claims, skipped, in_window = find_claims(receipts, offers, load_claimed(args.claimed), today)
@@ -235,16 +467,21 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog='costco-au', description=__doc__.split('\n')[0])
     sub = p.add_subparsers(dest='cmd', required=True)
     sub.add_parser('link', help='print the current In-Warehouse Savings booklet link')
+    sub.add_parser('login', help='open Chrome so you can sign in to costco.com.au (once)')
+    y = sub.add_parser('sync', help='save your receipts and the current booklet, using that sign-in')
+    y.add_argument('--months', type=int, default=2, help='how many months of receipts (default 2)')
     c = sub.add_parser('check', help='list what to ask for, from your receipts')
-    c.add_argument('receipts', help='costco-receipts.json saved by the snippet')
-    c.add_argument('booklet', help='costco-booklet.json saved by the snippet')
+    c.add_argument('receipts', nargs='?', default=os.path.join(HOME, 'receipts.json'),
+                   help='receipts file (default: the one sync saves; or costco-receipts.json from the snippet)')
+    c.add_argument('booklet', nargs='?', default=os.path.join(HOME, 'booklet.json'),
+                   help='booklet file (default: the one sync saves; or costco-booklet.json from the snippet)')
     c.add_argument('--claimed', help='CSV of refunds you already got (purchase_date,item)')
     c.add_argument('--extra', nargs='*', default=[], metavar='ITEM=OFF',
                    help='specials not in the booklet, such as a shelf sign: 122000=8.00')
     c.add_argument('--online', action='store_true', help='also look up costco.com.au online discounts')
     c.add_argument('--today', help='pretend today is YYYY-MM-DD')
     args = p.parse_args(argv)
-    {'link': cmd_link, 'check': cmd_check}[args.cmd](args)
+    {'link': cmd_link, 'login': cmd_login, 'sync': cmd_sync, 'check': cmd_check}[args.cmd](args)
 
 
 if __name__ == '__main__':

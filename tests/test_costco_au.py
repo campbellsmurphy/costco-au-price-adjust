@@ -82,6 +82,23 @@ class Check(unittest.TestCase):
         self.assertEqual(claims, [])
         self.assertIn('already refunded', [why for _, _, why in skipped])
 
+    def test_refund_receipt_ignored(self):
+        refund = "Member 00000000000\n249314\t1x\t24.99\t24.99 - 1\nTPD CHAMPION BOXER\n286845\t1x\t5.01\t5.01 1\n" \
+                 "TOTAL NUMBER OF ITEMS SOLD = -1\n22/10/2026 04:16:00 pm 108 000 0000 000\n"
+        self.assertIsNone(c.parse_receipt(refund))
+
+    def test_api_receipt(self):
+        line = lambda n, kind, qty, price: {'type': kind, 'itemNumber': n, 'qty': qty, 'sellPrice': {'value': price},
+                                            'itemDescription': ['ITEM ' + n]}
+        r = c.receipt_from_api({'recordType': 'SALE', 'transactionDateTime': '2026-10-22T04:52:00.000Z',
+                                'membershipNumber': '00000000000',
+                                'lines': [line('11356', 'CAPTURED', 1.0, 59.99), line('284856', 'COUPON', 1.0, 12.0),
+                                          line('112472', 'CAPTURED', 2.0, 27.49), line('29531', 'CAPTURED', 25.78, 1.54)]})
+        self.assertEqual(r['date'], datetime.date(2026, 10, 22))
+        self.assertEqual([(i['item'], i['qty'], i['discounted']) for i in r['items']],
+                         [('11356', 1, True), ('112472', 2, False)])
+        self.assertIsNone(c.receipt_from_api({'recordType': 'REFUND'}))
+
     def test_outside_30_days(self):
         claims, _, in_window = c.find_claims([self.receipt], self.offers, set(), datetime.date(2026, 11, 10))
         self.assertEqual((claims, in_window), ([], []))
