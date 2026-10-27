@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "costco-au-price-adjust"
+version = "0.1.0"
+description = "Find Costco Australia price adjustments worth asking for"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+
+[project.scripts]
+costco-au = "costco_au:main"
+
+[tool.setuptools]
+py-modules = ["costco_au"]
